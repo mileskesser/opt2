@@ -6,88 +6,96 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
+#define MAX_BUFFER 1024
+
 void error(const char *msg) {
     perror(msg);
     exit(1);
 }
 
-void otp_encrypt_decrypt(char *text, char *key, char *result, int length, int encrypt) {
-    for (int i = 0; i < length; ++i) {
-        int textVal = (text[i] == ' ') ? 26 : text[i] - 'A';
-        int keyVal = (key[i] == ' ') ? 26 : key[i] - 'A';
-        int resultVal = encrypt ? (textVal + keyVal) % 27 : (textVal - keyVal + 27) % 27;
-        result[i] = (resultVal == 26) ? ' ' : 'A' + resultVal;
-    }
-    result[length] = '\0';
+int charToNum(char c) {
+    if (c == ' ') return 26; // Space maps to 26
+    return c - 'A'; // 'A'-'Z' maps to 0-25
 }
 
-void handleConnection(int sock) {
-    char ciphertext[256], key[256], plaintext[256];
-    bzero(ciphertext, 256);
-    bzero(key, 256);
+char numToChar(int n) {
+    if (n == 26) return ' '; // 26 maps back to space
+    return 'A' + n; // 0-25 maps back to 'A'-'Z'
+}
 
-    // Read ciphertext from client
-    int n = read(sock, ciphertext, 255);
-    if (n < 0) error("ERROR reading from socket");
+void customDecrypt(char *ciphertext, char *key, char *plaintext, int text_length) {
+    for (int i = 0; i < text_length; i++) {
+        int ct_num = charToNum(ciphertext[i]);
+        int key_num = charToNum(key[i % strlen(key)]); // Loop key if shorter than plaintext
+        int pt_num = (ct_num - key_num + 27) % 27; // Add 27 to ensure the result is not negative
+        plaintext[i] = numToChar(pt_num);
+    }
+    plaintext[text_length] = '\0'; // Null-terminate the plaintext
+}
+
+void setupAddressStruct(struct sockaddr_in* address, int portNumber) {
+    memset((char*) address, '\0', sizeof(*address));
+    address->sin_family = AF_INET;
+    address->sin_port = htons(portNumber);
+    address->sin_addr.s_addr = INADDR_ANY;
+}
+
+void handleConnection(int connectionSocket) {
+    char buffer[MAX_BUFFER];
+    memset(buffer, '\0', MAX_BUFFER);
     
-    // Read key from client
-    n = read(sock, key, 255);
-    if (n < 0) error("ERROR reading from socket");
+    int charsRead = recv(connectionSocket, buffer, MAX_BUFFER - 1, 0);
+    if (charsRead < 0) error("ERROR reading from socket");
+    
+    char *ciphertext = strtok(buffer, "\n");
+    char *key = strtok(NULL, "\n");
+    if (ciphertext == NULL || key == NULL) error("ERROR parsing ciphertext or key");
 
-    // Perform decryption
-    otp_encrypt_decrypt(ciphertext, key, plaintext, strlen(ciphertext), 0); // 0 for decryption
+    char plaintext[MAX_BUFFER];
+    customDecrypt(ciphertext, key, plaintext, strlen(ciphertext));
 
-    // Send plaintext back to client
-    n = write(sock, plaintext, strlen(plaintext));
-    if (n < 0) error("ERROR writing to socket");
+    int charsWritten = send(connectionSocket, plaintext, strlen(plaintext), 0);
+    if (charsWritten < 0) error("ERROR writing to socket");
 
-    close(sock);
+    close(connectionSocket);
 }
 
 int main(int argc, char *argv[]) {
-    int sockfd, newsockfd, portno;
-    socklen_t clilen;
-    struct sockaddr_in serv_addr, cli_addr;
+    int listenSocket, connectionSocket;
+    struct sockaddr_in serverAddress, clientAddress;
+    socklen_t sizeOfClientInfo = sizeof(clientAddress);
 
     if (argc < 2) {
-        fprintf(stderr, "ERROR, no port provided\n");
+        fprintf(stderr,"USAGE: %s port\n", argv[0]);
         exit(1);
     }
 
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) 
-        error("ERROR opening socket");
-    
-    bzero((char *) &serv_addr, sizeof(serv_addr));
-    portno = atoi(argv[1]);
+    listenSocket = socket(AF_INET, SOCK_STREAM, 0);
+    if (listenSocket < 0) error("ERROR opening socket");
 
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_addr.s_addr = INADDR_ANY;
-    serv_addr.sin_port = htons(portno);
+    setupAddressStruct(&serverAddress, atoi(argv[1]));
 
-    if (bind(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) 
-        error("ERROR on binding");
-    
-    listen(sockfd, 5);
-    clilen = sizeof(cli_addr);
+    if (bind(listenSocket, (struct sockaddr *)&serverAddress, sizeof(serverAddress)) < 0) error("ERROR on binding");
+
+    listen(listenSocket, 5);
 
     while (1) {
-        newsockfd = accept(sockfd, (struct sockaddr *) &cli_addr, &clilen);
-        if (newsockfd < 0) 
-            error("ERROR on accept");
-        
+        connectionSocket = accept(listenSocket, (struct sockaddr *)&clientAddress, &sizeOfClientInfo);
+        if (connectionSocket < 0) error("ERROR on accept");
+
         int pid = fork();
-        if (pid < 0)
-            error("ERROR on fork");
+        if (pid < 0) error("ERROR on fork");
         if (pid == 0) {
-            close(sockfd);
-            handleConnection(newsockfd);
+            close(listenSocket);
+            handleConnection(connectionSocket);
             exit(0);
         } else {
-            close(newsockfd);
+            close(connectionSocket);
+            
         }
     }
 
-    close(sockfd);
-    return 0; 
+    close(listenSocket);
+    return 0;
 }
+
